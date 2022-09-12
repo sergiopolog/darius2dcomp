@@ -22,17 +22,15 @@ port(
 	
 	csync_in_n: in std_logic; -- Composite video sync. Pin 13 of IC105
 	
-	sw_in: in std_logic_vector(17 downto 0); -- Switches.
+	sw_in: in std_logic_vector(4 downto 0); -- Switches.
 	
 	-- OUT
-	vga_red_out: out std_logic_vector(9 downto 0);
-	vga_green_out: out std_logic_vector(9 downto 0);
-	vga_blue_out: out std_logic_vector(9 downto 0);
-	vga_hsync_out: out std_logic;
-	vga_vsync_out: out std_logic;
-	vga_blank_out: out std_logic;
-	vga_sog_out: out std_logic;
-	vga_clk_out: out std_logic
+	cga_red_out: out std_logic_vector(4 downto 0);
+	cga_green_out: out std_logic_vector(4 downto 0);
+	cga_blue_out: out std_logic_vector(4 downto 0);
+	cga_csync_out: out std_logic;
+	cga_blank_out: out std_logic;
+	cga_clk_out: out std_logic
 	
 );
 end entity;
@@ -140,7 +138,7 @@ begin
 	begin
 	-- (not hbl_prev or hbl_in_n) or lat_in_n
 		if (hcount >= HCOUNT_CAP_START and hcount < HCOUNT_CAP_END) then
-			capture_en <= '0' or hcount(0);
+			capture_en <= '0' or hcount(0); --only capture on even pulses of the input clock (doubled frequency as original pixel clock)
 		else
 			capture_en <= '1';
 		end if;
@@ -242,39 +240,29 @@ begin
 		end if;
 	end process;
 	
-	vga_clk_out <= not clk;
+	cga_clk_out <= not clk;
 
-	vga_output_set: process(clk)
+	cga_output_set: process(clk)
 	begin
 		if (rising_edge(clk)) then
-			if (sw_in(7) = '1') then
-				vga_blank_out <= display_en;
-			elsif (sw_in(5) = '0') then
-				vga_blank_out <= hbl_in_n and vbl_in_n;
-			elsif (sw_in(6) = '0') then
-				vga_blank_out <= '0';
+			if (sw_in(4) = '1') then
+				cga_blank_out <= display_en;
 			else
-				vga_blank_out <= '1';
+				cga_blank_out <= hbl_in_n and vbl_in_n;
 			end if;
+			cga_csync_out <= csync_in_n;
 			if (sw_in(2) = '1') then
-				vga_sog_out <= csync_in_n;
+				cga_red_out <= a_in_r;
+				cga_green_out <= a_in_g;
+				cga_blue_out <= a_in_b;
+			elsif (sw_in(3) = '1') then
+				cga_red_out <= b_in_r;
+				cga_green_out <= b_in_g;
+				cga_blue_out <= b_in_b;
 			else
-				vga_sog_out <= '0';
-			end if;
-			vga_hsync_out <= csync_in_n;
-			vga_vsync_out <= '1';
-			if (sw_in(3) = '1') then
-				vga_red_out <= a_in_r & a_in_r;
-				vga_green_out <= a_in_g & a_in_g;
-				vga_blue_out <= a_in_b & a_in_b;
-			elsif (sw_in(4) = '1') then
-				vga_red_out <= b_in_r & b_in_r;
-				vga_green_out <= b_in_g & b_in_g;
-				vga_blue_out <= b_in_b & b_in_b;
-			else
-				vga_red_out <= routed_output(14 downto 10) & routed_output(14 downto 10);
-				vga_green_out <= routed_output(9 downto 5) & routed_output(9 downto 5);
-				vga_blue_out <= routed_output(4 downto 0) & routed_output(4 downto 0);
+				cga_red_out <= routed_output(14 downto 10);
+				cga_green_out <= routed_output(9 downto 5);
+				cga_blue_out <= routed_output(4 downto 0);
 			end if;
 		end if;
 	end process;
