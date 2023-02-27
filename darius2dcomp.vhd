@@ -252,17 +252,17 @@ begin
 			end if;
 			cga_csync_out <= csync_in_n;
 			if (sw_in(2) = '1') then
-				cga_red_out <= a_in_r;
-				cga_green_out <= a_in_g;
-				cga_blue_out <= a_in_b;
+				cga_red_out <= a_in_r & a_in_r;
+				cga_green_out <= a_in_g & a_in_g;
+				cga_blue_out <= a_in_b & a_in_b;
 			elsif (sw_in(3) = '1') then
-				cga_red_out <= b_in_r;
-				cga_green_out <= b_in_g;
-				cga_blue_out <= b_in_b;
+				cga_red_out <= b_in_r & b_in_r;
+				cga_green_out <= b_in_g & b_in_g;
+				cga_blue_out <= b_in_b & b_in_b;
 			else
-				cga_red_out <= routed_output(14 downto 10);
-				cga_green_out <= routed_output(9 downto 5);
-				cga_blue_out <= routed_output(4 downto 0);
+				cga_red_out <= routed_output(14 downto 10) & routed_output(14 downto 10);
+				cga_green_out <= routed_output(9 downto 5) & routed_output(9 downto 5);
+				cga_blue_out <= routed_output(4 downto 0) & routed_output(4 downto 0);
 			end if;
 		end if;
 	end process;
