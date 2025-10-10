@@ -1,0 +1,309 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.std_logic_unsigned.all;
+
+entity darius2dcomp is
+port(
+	-- DARIUS II CONNECTIONS
+	clk: in std_logic; -- ~12MHz clock (13.343MHz). 74LS74 @ IC53 pin 5.
+	
+	-- Simultaneous RGB inputs for TC0070RGB #1 at IC58.
+	a_in_r: in std_logic_vector(4 downto 0); -- DAC pins 16-12.
+	a_in_g: in std_logic_vector(4 downto 0); -- DAC pins 11-7.
+	a_in_b: in std_logic_vector(4 downto 0); -- DAC pins 6-2.
+	-- ...and TC0070RGB #2 at IC41.
+	b_in_r: in std_logic_vector(4 downto 0); -- DAC pins 16-12.
+	b_in_g: in std_logic_vector(4 downto 0); -- DAC pins 11-7.
+	b_in_b: in std_logic_vector(4 downto 0); -- DAC pins 6-2.
+	
+	hbl_in_n: in std_logic; -- Horizontal blank. DAC pin 18. (IC36 pin 12)
+	vbl_in_n: in std_logic; -- Vertical blank. DAC pin 19. (IC33 pin 1)
+	lat_in_n: in std_logic; -- Pixel latch, ~6MHz (6.6715MHz). DAC pin 20.
+	
+	csync_in_n: in std_logic; -- Composite video sync. Pin 13 of IC105
+	
+	sw_in: in std_logic_vector(4 downto 0); -- Switches.
+	
+	-- OUT
+	cga_red_out: out std_logic_vector(4 downto 0);
+	cga_green_out: out std_logic_vector(4 downto 0);
+	cga_blue_out: out std_logic_vector(4 downto 0);
+	cga_csync_out: out std_logic;
+	cga_blank_out: out std_logic;
+	cga_clk_out: out std_logic
+	
+);
+end entity;
+
+architecture behavioral of darius2dcomp is
+
+signal buffer_en_a0: std_logic := '0';
+signal buffer_en_a1: std_logic := '0';
+signal buffer_en_b0: std_logic := '0';
+signal buffer_en_b1: std_logic := '0';
+
+-- Input signals for monitors A and B
+signal buffer_in_a0: std_logic_vector(14 downto 0);
+signal buffer_in_a1: std_logic_vector(14 downto 0);
+signal buffer_in_b0: std_logic_vector(14 downto 0);
+signal buffer_in_b1: std_logic_vector(14 downto 0);
+
+signal buffer_sel: std_logic := '0';
+--signal buffer_sel_prev: std_logic := '0';
+
+signal hbl: std_logic := '0';
+signal hbl_prev: std_logic := '0';
+signal hbl_prev_2: std_logic := '0';
+signal vbl: std_logic := '0';
+signal vbl_prev: std_logic := '0';
+signal vbl_delay: std_logic := '0';
+
+signal raw_in_a: std_logic_vector(14 downto 0);
+signal raw_in_b: std_logic_vector(14 downto 0);
+
+-- Output signals, pre-mux, from the monitor buffers
+signal buffer_out_a0: std_logic_vector(14 downto 0);
+signal buffer_out_a1: std_logic_vector(14 downto 0);
+signal buffer_out_b0: std_logic_vector(14 downto 0);
+signal buffer_out_b1: std_logic_vector(14 downto 0);
+
+signal buffer_pretap_a0: std_logic_vector(14 downto 0);
+signal buffer_pretap_a1: std_logic_vector(14 downto 0);
+signal buffer_pretap_b0: std_logic_vector(14 downto 0);
+signal buffer_pretap_b1: std_logic_vector(14 downto 0);
+
+signal hcount: std_logic_vector(17 downto 0) := (others => '0');
+
+signal routed_output: std_logic_vector(14 downto 0);
+
+--SIZE:		424x262
+--VISIBLE:	320x240
+--HBLANK:	104 pixel clock pulses
+--VBLANK:	22 lines
+--HBLANK=0 before VBLANK rising  to 1:	40 pixel clock pulses
+--HBLANK=0 after  VBLANK rising  to 1:	64 pixel clock pulses
+--HBLANK=0 before VBLANK falling to 0:	40 pixel clock pulses
+--HBLANK=0 after  VBLANK falling to 0:	64 pixel clock pulses
+
+--HSYNC is 52 pixels wide and it's exactly centered within HBLANK pulse (26 pixels gap before and after)
+--From HBLANK=0 to HSYNC=0:	26 pixel clock pulses
+--From HSYNC=0  to HSYNC=1:	52 pixel clock pulses
+--From HSYNC=1  to HBLANK=1:	26 pixel clock pulses
+
+--VSYNC is 4 lines wide and it's NOT centered. It starts 4 lines after VBLANK pulse starts and ends 14 lines before VBLANK pulse ends (4 - 4 - 14)
+--From VBLANK=0 to VSYNC=0:	4 lines
+--From VSYNC=0  to VSYNC=1:	4 lines
+--From VSYNC=1  to VBLANK=1:	14 lines
+
+--MAME data (WRONG):
+--lscreen.set_size(40*8, 32*8);  (320, 256)
+--lscreen.set_visarea(0*8, 40*8-1, 3*8, 32*8-1);  (0, 319, 24, 255)
+
+constant BACKPORCH: integer := 0;
+
+constant RASTER_W: integer := 322; -- only visible 320?
+
+constant HCOUNT_ADJ: integer := 206; -- when HBlank period ends
+
+constant HCOUNT_CAP_START: integer := HCOUNT_ADJ; 									-- 206
+constant HCOUNT_CAP_END: integer := HCOUNT_CAP_START + (2 * RASTER_W) + 2;	-- 852
+
+constant HCOUNT_A_START: integer := HCOUNT_ADJ + 2;								-- 208
+constant HCOUNT_A_END: integer := HCOUNT_A_START + RASTER_W;					-- 530
+
+constant HCOUNT_B_START: integer := HCOUNT_ADJ + RASTER_W;						-- 528
+constant HCOUNT_B_END: integer := HCOUNT_B_START + RASTER_W;					-- 850
+
+constant HCOUNT_VBLANK: integer := 80; -- (40 * 2) number of clk pulses HBlank starts before VBlank starts and ends
+
+signal capture_en: std_logic := '0';
+signal scanout_a_en: std_logic := '0';
+signal scanout_b_en: std_logic := '0';
+signal display_en: std_logic := '0';
+
+signal debug_a_color: std_logic_vector(14 downto 0) := "111100111001110";
+signal debug_b_color: std_logic_vector(14 downto 0) := "011100111011110";
+signal debug_blank_color: std_logic_vector(14 downto 0) := "000000000000000";
+
+begin
+
+-- Monitor A input buffers
+	buffer_a0: entity work.linebuffer(behavioral) generic map(RASTER_W) port map (clk, buffer_en_a0, buffer_in_a0, buffer_out_a0, buffer_pretap_a0);
+	buffer_a1: entity work.linebuffer(behavioral) generic map(RASTER_W) port map (clk, buffer_en_a1, buffer_in_a1, buffer_out_a1, buffer_pretap_a1);
+-- Monitor B input buffers                                                                              
+	buffer_b0: entity work.linebuffer(behavioral) generic map(RASTER_W) port map (clk, buffer_en_b0, buffer_in_b0, buffer_out_b0, buffer_pretap_b0);
+	buffer_b1: entity work.linebuffer(behavioral) generic map(RASTER_W) port map (clk, buffer_en_b1, buffer_in_b1, buffer_out_b1, buffer_pretap_b1);
+
+	raw_in_a <= a_in_r & a_in_g & a_in_b;
+	raw_in_b <= b_in_r & b_in_g & b_in_b;
+	
+	clk_proc: process(clk)
+	begin
+		if (rising_edge(clk)) then
+		
+			-- EDGE TRACKER
+			hbl_prev_2 <= hbl_prev;
+			hbl_prev <= hbl;
+			hbl <= hbl_in_n;
+			vbl_prev <= vbl;
+			vbl <= vbl_in_n;
+			
+			
+			-- LINE COUNT
+			-- HBlank reset
+			if (hbl = '0' and hbl_prev = '1') then
+				hcount <= (others => '0');		-- Reset hcount at the beginning of every HBlank
+			-- Start of active raster.
+			else
+				hcount <= hcount + 1;			-- count pulses of ~12MHz input clock (twice faster than pixel clock) starting just when HBlank period starts
+			end if;
+			
+			
+			-- VBLANK DELAY
+			-- Delays VBlank transitions one line and put it at the same place it originally happened with respect to HBlank
+			if (hcount = HCOUNT_VBLANK and vbl_prev /= vbl_delay) then
+				vbl_delay <= vbl_prev;
+			end if;
+			
+			
+			-- BUFFER SWITCH
+			-- Each end of line swaps buffers.
+			if (vbl_in_n = '0') then
+				buffer_sel <= '0';				-- Reset buffers when VBlank starts and don't switch between them while VBlank period is active
+			elsif (hcount = 0) then
+				buffer_sel <= not buffer_sel;	-- Switch between buffers at the start of HBlank period of each raster line, only when VBlank is not active ...
+			end if;									-- ... so, right VBlank ends, HBlank period is already started (40 clk pulses), so first line of raster will be at buffer_sel = '0' and in the second line (when hcount is 0 after vblank ends) it will be buffer_sel = '1'
+		
+		
+			-- CGA OUTPUT
+			if (sw_in(4) = '1') then
+				cga_blank_out <= display_en;
+			else
+				cga_blank_out <= hbl and vbl_delay;
+			end if;
+			cga_csync_out <= csync_in_n;
+			if (sw_in(2) = '1') then
+				cga_red_out <= a_in_r;
+				cga_green_out <= a_in_g;
+				cga_blue_out <= a_in_b;
+			elsif (sw_in(3) = '1') then
+				cga_red_out <= b_in_r;
+				cga_green_out <= b_in_g;
+				cga_blue_out <= b_in_b;
+			else
+				cga_red_out <= routed_output(14 downto 10);
+				cga_green_out <= routed_output(9 downto 5);
+				cga_blue_out <= routed_output(4 downto 0);
+			end if;
+			
+		end if;
+	end process;
+	
+	buffer_signals: process(buffer_out_a0, buffer_out_b0, buffer_out_a1, buffer_out_b1,
+	                            raw_in_a, raw_in_b, buffer_sel, hbl_in_n, hbl_prev,
+										 hbl_prev_2, vbl, vbl_delay, lat_in_n, sw_in, hcount,
+										 buffer_pretap_b0, buffer_pretap_b1)
+	begin
+	-- (not hbl_prev or hbl_in_n) or lat_in_n
+		-- (hcount >= 206 (103)			 and hcount < 852 (426)		 ) then		-- size: 646 (323)
+		if (hcount >= HCOUNT_CAP_START and hcount < HCOUNT_CAP_END) then
+			capture_en <= not vbl or hcount(0); -- only capturing outside original VBlank period and only on even pulses of the input clock (twice faster frequency than original pixel clock). This effectively captures only 323 times (646 / 2), the h-size of each screen
+--			capture_en <= '0' or hcount(0); -- only capturing on even pulses of the input clock (twice faster frequency than original pixel clock). This effectively captures only 323 times (646 / 2), the h-size of each screen
+		else
+			capture_en <= '1';
+		end if;
+		
+		-- (hcount >= 208 			  and hcount < 530			) then		-- size: 322
+		if (hcount >= HCOUNT_A_START and hcount < HCOUNT_A_END) then
+			scanout_a_en <= not (hbl_prev or hbl_in_n); -- only enable scanout when hblank ends (hbl_in_n = 1) and lasts until one pulse after hblank starts again
+		else
+			scanout_a_en <= '1';  -- when scanout is disabled for both screens, output is set to blank (zero values). That is done later down
+		end if;
+		
+		-- (hcount >= 528 			  and hcount < 850			) then		-- size: 322 	(overlaps two pixels with previous screen ?? )
+		if (hcount >= HCOUNT_B_START and hcount < HCOUNT_B_END) then
+			scanout_b_en <= not (hbl_prev or hbl_in_n); -- only enable scanout when hblank ends (hbl_in_n = 1) and lasts until one pulse after hblank starts again
+		else
+			scanout_b_en <= '1';  -- when scanout is disabled for both screens, output is set to blank (zero values). That is done later down
+		end if;
+		
+		-- (hcount >= 208 			  and hcount <= 850			 ) then		-- size: 642
+		if (hcount >= HCOUNT_A_START and hcount <= HCOUNT_B_END) then
+			display_en <= '1';
+		else
+			display_en <= '0';
+		end if;
+	end process;
+	
+	line_buffer_select: process(buffer_out_a0, buffer_out_b0, buffer_out_a1, buffer_out_b1,
+	                            raw_in_a, raw_in_b, buffer_sel, hbl_in_n, hbl_prev,
+										 hbl_prev_2, vbl, vbl_delay, lat_in_n, sw_in, hcount, capture_en,
+										 buffer_pretap_b0, buffer_pretap_b1,
+										 scanout_a_en, scanout_b_en)
+	begin
+		if (buffer_sel = '0') then
+			-- BUFFER 0 SCANOUT
+			if (vbl_delay = '0') then
+				routed_output <= debug_blank_color;	-- VBlank period (as buffer is scanning out with one line delay, it should start scanout effectively one line after original VBlank ends and until one line after next original VBlank starts again
+			elsif (scanout_a_en = '0') then
+				routed_output <= buffer_out_a0;		-- Assign output data when line buffer is enabled to scanout
+			elsif (scanout_b_en = '0') then
+				routed_output <= buffer_out_b0;  
+			else
+				routed_output <= debug_blank_color;	-- HBlank period
+			end if;
+			buffer_in_a0 <= (others => '0');			-- While Buffer 0 is scanning out, blank pixels (all 0) are simultaneously pushed into the line buffer each clock pulse
+			buffer_in_b0 <= (others => '0');
+			buffer_en_a0 <= scanout_a_en;				-- Only pop out data from line buffer 0 when scanout flag is enabled (0)
+			buffer_en_b0 <= scanout_b_en;
+			
+			-- Buffer 1 CAPTURE
+			if (sw_in(0) = '1') then
+				buffer_in_a1 <= debug_a_color;
+			else
+				buffer_in_a1 <= raw_in_a;				-- Capture input pixel data only ...
+			end if;
+			if (sw_in(1) = '1') then
+				buffer_in_b1 <= debug_b_color;
+			else
+				buffer_in_b1 <= raw_in_b;
+			end if;
+				
+			buffer_en_a1 <= capture_en;				-- ... when line buffer 1 is enabled (0)
+			buffer_en_b1 <= capture_en;
+		else
+			-- BUFFER 1 SCANOUT
+			if (vbl_delay = '0') then
+				routed_output <= debug_blank_color;	-- VBlank period (as buffer is scanning out with one line delay, it should start scanout effectively one line after original VBlank ends and until one line after next original VBlank starts again
+			elsif (scanout_a_en = '0') then
+				routed_output <= buffer_out_a1;		-- Assign output data when line buffer is enabled to scanout
+			elsif (scanout_b_en = '0') then
+				routed_output <= buffer_out_b1;  
+			else
+				routed_output <= debug_blank_color;	-- HBlank period
+			end if;
+			buffer_in_a1 <= (others => '0');			-- While Buffer 1 is scanning out, blank pixels (all 0) are simultaneously pushed into the line buffer each clock pulse
+			buffer_in_b1 <= (others => '0');
+			buffer_en_a1 <= scanout_a_en;				-- Only pop out data from line buffer 1 when scanout flag is enabled (0)
+			buffer_en_b1 <= scanout_b_en;
+			
+			-- Buffer 0 CAPTURE
+			if (sw_in(0) = '1') then
+				buffer_in_a0 <= debug_a_color;
+			else
+				buffer_in_a0 <= raw_in_a;				-- Capture input pixel data only ...
+			end if;
+			if (sw_in(1) = '1') then
+				buffer_in_b0 <= debug_b_color;
+			else
+				buffer_in_b0 <= raw_in_b;
+			end if;
+			
+			buffer_en_a0 <= capture_en;				-- ... when line buffer 0 is enabled (0)
+			buffer_en_b0 <= capture_en;
+		end if;
+	end process;
+	
+	cga_clk_out <= not clk;
+	
+end architecture;
